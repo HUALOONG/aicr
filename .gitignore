@@ -1,0 +1,47 @@
+# ===== Maven =====
+target/
+pom.xml.*
+.flattened-pom.xml
+release.properties
+
+# ===== Node / 前端 =====
+node_modules/
+dist/
+dist-ssr/
+.vite/
+coverage/
+*.tsbuildinfo
+*.local
+.pnpm-store/
+
+# ===== IDE =====
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+.factorypath
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# ===== Logs & temp =====
+*.log
+logs/
+tmp/
+hs_err_pid*
+replay_pid*
+
+# ===== 环境变量 & 密钥 =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
