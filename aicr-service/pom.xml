@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xmlns="http://maven.apache.org/POM/4.0.0"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.joyintech</groupId>
+        <artifactId>aicr-parent</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <artifactId>aicr-service</artifactId>
+    <packaging>jar</packaging>
+    <name>aicr-service</name>
+    <description>业务逻辑层：评审/规则/用户管理等核心业务</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.joyintech</groupId>
+            <artifactId>aicr-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.joyintech</groupId>
+            <artifactId>aicr-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.joyintech</groupId>
+            <artifactId>aicr-base</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.joyintech</groupId>
+            <artifactId>aicr-security</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 库模块禁止 repackage；仅 web/webhook/worker 可执行 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>ban-engine</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <bannedDependencies>
+                                    <excludes>
+                                        <exclude>com.joyintech:aicr-engine</exclude>
+                                    </excludes>
+                                    <message>service 禁止依赖 engine（HLD §2.4.3 红线二：engine 唯一执行入口是 worker）
+                                    </message>
+                                </bannedDependencies>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xmlns="http://maven.apache.org/POM/4.0.0"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.joyintech</groupId>
+        <artifactId>aicr-parent</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <artifactId>aicr-webhook</artifactId>
+    <packaging>jar</packaging>
+    <name>aicr-webhook</name>
+    <description>回调服务层：Git 平台 Webhook 接收、签名校验、幂等、建任务、入队（base+security+api+common）</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.joyintech</groupId>
+            <artifactId>aicr-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.joyintech</groupId>
+            <artifactId>aicr-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.joyintech</groupId>
+            <artifactId>aicr-base</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.joyintech</groupId>
+            <artifactId>aicr-security</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>me.paulschwarz</groupId>
+            <artifactId>springboot4-dotenv</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- 架构约束测试：校验 HLD §2.4.4 依赖矩阵 -->
+        <dependency>
+            <groupId>com.tngtech.archunit</groupId>
+            <artifactId>archunit-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <!-- CI/CD 规范 §4：制品固定为 aicr-webhook.jar，不带版本号 -->
+        <finalName>aicr-webhook</finalName>
+        <!-- 配置文件不进 jar：默认资源处理排除配置类资源，仅由 ③ copy-resources 外置到 target/conf/ -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <excludes>
+                    <exclude>**/*.yml</exclude>
+                    <exclude>**/*.yaml</exclude>
+                    <exclude>**/*.properties</exclude>
+                    <exclude>**/*.xml</exclude>
+                </excludes>
+            </resource>
+        </resources>
+        <plugins>
+            <!-- ① Spring Boot 打包插件：生成瘦身 jar，排除所有依赖 -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <layout>ZIP</layout>
+                    <includes>
+                        <!-- 匹配不到任何依赖，等于排除所有第三方 jar -->
+                        <include>
+                            <groupId>nothing</groupId>
+                            <artifactId>nothing</artifactId>
+                        </include>
+                    </includes>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- ② 依赖拷贝插件：将所有依赖输出到 libs/ 目录 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>copy-dependencies</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>copy-dependencies</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/libs</outputDirectory>
+                            <excludeTransitive>false</excludeTransitive>
+                            <stripVersion>false</stripVersion>
+                            <includeScope>runtime</includeScope>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- ③ 资源拷贝插件：将配置文件输出到 conf/ 目录 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-resources-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>copy-resources</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>copy-resources</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/conf</outputDirectory>
+                            <resources>
+                                <resource>
+                                    <directory>src/main/resources</directory>
+                                    <includes>
+                                        <include>**/*.yml</include>
+                                        <include>**/*.yaml</include>
+                                        <include>**/*.properties</include>
+                                        <include>**/*.xml</include>
+                                    </includes>
+                                </resource>
+                            </resources>
+                        </configuration>
+                    </execution>
+                    <!-- ④ 运维脚本：与 jar / libs / conf 组成完整部署目录（CI/CD 规范 §4） -->
+                    <execution>
+                        <id>copy-scripts</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>copy-resources</goal>
+                        </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/bin</outputDirectory>
+                            <resources>
+                                <resource>
+                                    <directory>${project.parent.basedir}/bin</directory>
+                                    <includes>
+                                        <include>*.sh</include>
+                                        <include>*.cmd</include>
+                                    </includes>
+                                </resource>
+                            </resources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- 红线：webhook 禁止依赖 service 与 engine（HLD §2.4.3） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>ban-service-engine</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <bannedDependencies>
+                                    <excludes>
+                                        <exclude>com.joyintech:aicr-service</exclude>
+                                        <exclude>com.joyintech:aicr-engine</exclude>
+                                    </excludes>
+                                    <message>webhook 禁止依赖 service / engine（HLD §2.4.3 红线）</message>
+                                </bannedDependencies>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

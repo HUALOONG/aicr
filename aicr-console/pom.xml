@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xmlns="http://maven.apache.org/POM/4.0.0"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.joyintech</groupId>
+        <artifactId>aicr-parent</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <artifactId>aicr-console</artifactId>
+    <packaging>pom</packaging>
+    <name>aicr-console</name>
+    <description>前端工程（Vue 3 + TypeScript + Vite+，vp CLI）</description>
+
+    <properties>
+        <!-- 一键跳过前端构建：mvn clean install -Dconsole.skip=false 才构建前端（骨架期默认跳过，使后端 mvn verify 可独立跑绿） -->
+        <console.skip>true</console.skip>
+        <!-- CI 质量门禁：mvn verify -Dconsole.verify.skip=false 时额外执行 vp check / vp test run -->
+        <console.verify.skip>true</console.verify.skip>
+    </properties>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>exec-maven-plugin</artifactId>
+                <executions>
+                    <!-- 1) 依赖安装：由 vp 统一调度 Node / pnpm 版本，保证与本地/CI 环境一致 -->
+                    <execution>
+                        <id>vp-install</id>
+                        <phase>generate-resources</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${console.skip}</skip>
+                            <workingDirectory>${project.basedir}</workingDirectory>
+                            <executable>vp</executable>
+                            <arguments>
+                                <argument>install</argument>
+                                <argument>--frozen-lockfile</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+
+                    <!-- 2) 质量门禁（默认关闭；CI 用 -Dconsole.verify.skip=false 开启，对应设计 §15.3） -->
+                    <execution>
+                        <id>vp-check</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${console.verify.skip}</skip>
+                            <workingDirectory>${project.basedir}</workingDirectory>
+                            <executable>vp</executable>
+                            <arguments>
+                                <argument>check</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>vp-test</id>
+                        <phase>test</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${console.verify.skip}</skip>
+                            <workingDirectory>${project.basedir}</workingDirectory>
+                            <executable>vp</executable>
+                            <arguments>
+                                <argument>test</argument>
+                                <argument>--run</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+
+                    <!-- 3) 生产构建：vp build → aicr-console/dist/ -->
+                    <execution>
+                        <id>vp-build</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <skip>${console.skip}</skip>
+                            <workingDirectory>${project.basedir}</workingDirectory>
+                            <executable>vp</executable>
+                            <arguments>
+                                <argument>build</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
