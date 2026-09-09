@@ -1,0 +1,2159 @@
+openapi: 3.1.0
+
+info:
+  title: AI 驱动代码评审与测试生成平台 API
+  version: 1.0.0
+  summary: 控制台 RPC 接口与 Webhook 入站回调的字段级契约
+  description: |
+    本文件是**接口字段级契约的唯一事实依据**（覆盖 98 个接口），取代各设计文档中的示例片段。
+
+    ## 统一约定
+    - **风格**：RPC，`POST /api/v1/{module}/{action}`，不使用 RESTful。
+    - **请求**：`Content-Type: application/json`，业务参数统一置于 `param` 字段，顶层可携带 `requestId`（UUID，缺省由服务端补全）。
+    - **响应**：HTTP 200 + `{code, message, data, requestId}`；业务异常由 `code` 表达，不使用 HTTP 状态码区分业务错误。
+    - **错误码**：`0` 成功 / `40001` 参数校验失败 / `40101` 未登录或 Token 过期 / `40301` 无权限 / `40401` 资源不存在 / `50001` 系统内部错误 / `50002` LLM 调用失败。
+    - **认证**：`Authorization: Bearer {token}`（JWT，有效期 7 天）；`auth/login`、`auth/refreshToken`、`webhook/receive` 除外。
+    - **权限**：每个操作的 `x-roles` 声明允许访问的角色；`AUDITOR` / `OPERATOR` 为预留角色，v1.0 不实现（SRS §5.2 注）。
+    - **数据权限**：全部在后端 SQL 层按 `data_permission` 表驱动过滤（LLD §7.2），**前端不传递任何数据范围参数**。
+    - **状态口径**：任务列表展示与筛选一律按业务状态 `sub_status`（14 态），`status`（主状态 0~4）仅用于统计聚合。
+
+    ## 例外
+    - `POST /webhook/receive` 是 Git 平台入站回调：**无 Bearer 认证**，改用平台签名校验；HTTP 状态码承载语义（200/401/400/503），见 SRS BR-W-09。
+
+    ## 错误响应
+    业务失败时仍返回 HTTP 200，由 `code` 表达（见上文错误码表）。参数校验失败（40001）时 `data` 中**可**携带 `detail` 对象，
+    键为字段名、值为错误提示，前端按字段回填到表单；`detail` 为可选，未返回时仅展示 `message`：
+
+    ```json
+    {"code": 40001, "message": "参数校验失败", "data": {"detail": {"ruleCode": "规则编号已存在", "severity": "取值非法"}}, "requestId": "uuid"}
+    ```
+
+    ## 链路标识
+    - `requestId`：客户端生成（UUID），置于请求/响应体顶层，原样回传。
+    - `traceId`：服务端在 Webhook 入口生成，通过 HTTP 头 **`X-Trace-Id`** 透传，并贯穿 Kafka 消息与出站调用。
+
+    两者语义与兜底规则见《编码规范》§7。
+
+    ## 关联文档
+    SRS（第 5 章接口需求）/ HLD（第 6 章接口概要）/ LLD（第 5 章接口详细设计）/ Prompt 设计说明书（指令变量与输出 Schema）/ 前端设计说明书（附录 A 页面↔接口映射）。
+
+servers:
+  - url: 'http://localhost:8080/api/v1'
+    description: aicr-web（控制台 RPC 入口）
+  - url: 'http://localhost:8081/api/v1'
+    description: aicr-webhook（Git 平台入站回调，承载 /webhook/receive）
+
+security:
+  - bearerAuth: [ ]
+
+tags:
+  - name: 评审概览
+    description: FR-001~004，宏观质量视图
+  - name: 智能分析
+    description: FR-005~007，任务列表、分析报告、变更追溯
+  - name: 规则配置
+    description: FR-008~011，指令、评审规则、测试策略、规则模板
+  - name: 运维管理
+    description: FR-012~013，系统监控与审计日志
+  - name: 权限管理
+    description: FR-014~017，用户、角色、部门、数据权限
+  - name: 系统配置
+    description: FR-018~020，平台接入、模型配置、通知设置
+  - name: 成本管理
+    description: FR-021，配额规则与消耗统计
+  - name: 认证
+    description: 登录、刷新令牌、登出、当前用户
+  - name: 核心引擎
+    description: FR-022~026，Webhook 接收、人工重试、反馈闭环
+
+paths:
+  # ── 评审概览（4） ────────────────────────────────────────────────
+  /dashboard/summary:
+    post:
+      tags: [ 评审概览 ]
+      summary: 概览总览（FR-001）
+      operationId: dashboardSummary
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      description: 4 个指标卡片 + 环比变化；综合评分公式 Score = 100 - (Blocker×10 + Critical×5 + Minor×1)，下限 0
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_dashboardSummary' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_dashboardSummary' } } } }
+
+  /dashboard/issueDistribution:
+    post:
+      tags: [ 评审概览 ]
+      summary: 问题分布（FR-002）
+      operationId: dashboardIssueDistribution
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_dashboardIssueDistribution' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_dashboardIssueDistribution' } } } }
+
+  /dashboard/qualityTrend:
+    post:
+      tags: [ 评审概览 ]
+      summary: 质量趋势（FR-003）
+      operationId: dashboardQualityTrend
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_dashboardQualityTrend' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_dashboardQualityTrend' } } } }
+
+  /dashboard/repoAnalysis:
+    post:
+      tags: [ 评审概览 ]
+      summary: 仓库分析（FR-004）
+      operationId: dashboardRepoAnalysis
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      description: ADMIN/PM/QA 可看全量；DEVELOPER 仅看有权限的仓库
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_dashboardRepoAnalysis' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_dashboardRepoAnalysis' } } } }
+
+  # ── 智能分析（12） ───────────────────────────────────────────────
+  /review/list:
+    post:
+      tags: [ 智能分析 ]
+      summary: 任务列表（FR-005）
+      operationId: reviewList
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      description: 服务端分页，默认每页 20 条，按触发时间倒序；DEVELOPER 仅本人数据
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_reviewList' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_reviewList' } } } }
+
+  /review/getReport:
+    post:
+      tags: [ 智能分析 ]
+      summary: 分析报告（FR-006，首屏聚合三 Tab）
+      operationId: reviewGetReport
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      description: 一次返回任务信息 + 变更解读 + 评审意见 + 测试用例。评论或用例超过 200 条时改用 getChangeAnalysis / getReviewComments / getTestCases 分片加载（LLD §5.3.2）
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_reviewGetReport' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_reviewGetReport' } } } }
+
+  /review/getChangeAnalysis:
+    post:
+      tags: [ 智能分析 ]
+      summary: 变更解读（FR-006 Tab1）
+      operationId: reviewGetChangeAnalysis
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      description: 与 getReport 的 changeAnalysis 段同源；用于 Tab1 单独刷新或按需加载
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_TaskId' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_ChangeAnalysis' } } } }
+
+  /review/getReviewComments:
+    post:
+      tags: [ 智能分析 ]
+      summary: 评审意见列表（FR-006 Tab2）
+      operationId: reviewGetReviewComments
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      description: 评论超过 200 条时使用的分片接口
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_TaskId' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_ReviewCommentList' } } } }
+
+  /review/getTestCases:
+    post:
+      tags: [ 智能分析 ]
+      summary: 测试用例列表（FR-006 Tab3）
+      operationId: reviewGetTestCases
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      description: 用例超过 200 条时使用的分片接口
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_TaskId' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_TestCaseList' } } } }
+
+  /review/getTrace:
+    post:
+      tags: [ 智能分析 ]
+      summary: 变更追溯图谱（FR-007）
+      operationId: reviewGetTrace
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_TaskId' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_reviewGetTrace' } } } }
+
+  /review/confirmComment:
+    post:
+      tags: [ 智能分析 ]
+      summary: 确认评审意见有效（FR-006）
+      operationId: reviewConfirmComment
+      x-roles: [ ADMIN, PM, QA ]
+      description: 置 review_comment.confirm_status=1；驱动 FR-026 确认样本库
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_reviewConfirmComment' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /review/rejectComment:
+    post:
+      tags: [ 智能分析 ]
+      summary: 标记评审意见为误报（FR-006）
+      operationId: reviewRejectComment
+      x-roles: [ ADMIN, PM, QA ]
+      description: 置 review_comment.confirm_status=2；驱动 FR-026 误报特征库（BR-FB-01）与 TOPIC_FEEDBACK 消息
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_reviewRejectComment' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /review/addTestCase:
+    post:
+      tags: [ 智能分析 ]
+      summary: 手动补充测试用例（FR-006 Tab3）
+      operationId: reviewAddTestCase
+      x-roles: [ ADMIN, PM, QA ]
+      description: 落 test_case 时 source=1（手动）
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_reviewAddTestCase' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /review/updateTestCaseStatus:
+    post:
+      tags: [ 智能分析 ]
+      summary: 标注测试用例验证状态（FR-006 Tab3）
+      operationId: reviewUpdateTestCaseStatus
+      x-roles: [ ADMIN, PM, QA ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_reviewUpdateTestCaseStatus' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /review/trigger:
+    post:
+      tags: [ 智能分析 ]
+      summary: 手动触发评审（FR-005）
+      operationId: reviewTrigger
+      x-roles: [ ADMIN, PM ]
+      description: service 仅发送 Kafka TOPIC_REVIEW_REQUEST，不直接调用 engine（HLD 红线二）
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_reviewTrigger' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_reviewTrigger' } } } }
+
+  /review/retry:
+    post:
+      tags: [ 智能分析 ]
+      summary: 重试评审任务（FR-005）
+      operationId: reviewRetry
+      x-roles: [ ADMIN, PM ]
+      description: 发送 Kafka TOPIC_REVIEW_RETRY；retryFrom 允许 FAILED / TIMEOUT / DEGRADED / PARTIAL_SUCCESS
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_reviewRetry' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  # ── 规则配置（24） ───────────────────────────────────────────────
+  /prompt/list:
+    post:
+      tags: [ 规则配置 ]
+      summary: 指令列表（FR-008）
+      operationId: promptList
+      x-roles: [ ADMIN, PM, QA ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_promptList' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_promptList' } } } }
+
+  /prompt/getById:
+    post:
+      tags: [ 规则配置 ]
+      summary: 指令详情（FR-008）
+      operationId: promptGetById
+      x-roles: [ ADMIN, PM, QA ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_PromptDetail' } } } }
+
+  /prompt/create:
+    post:
+      tags: [ 规则配置 ]
+      summary: 创建指令（FR-008）
+      operationId: promptCreate
+      x-roles: [ ADMIN, PM ]
+      description: SYSTEM 分类启用项全局唯一，启用第 2 条时返回 40001（Prompt 设计说明书 §2.1）
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_promptSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /prompt/update:
+    post:
+      tags: [ 规则配置 ]
+      summary: 更新指令（FR-008）
+      operationId: promptUpdate
+      x-roles: [ ADMIN, PM ]
+      description: 自动 current_version+1 并写 prompt_version；必须携带 changeDesc
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_promptSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /prompt/delete:
+    post:
+      tags: [ 规则配置 ]
+      summary: 删除指令（FR-008）
+      operationId: promptDelete
+      x-roles: [ ADMIN ]
+      description: 被规则/策略快照引用的模板不做物理删除（快照为文本副本，无外键）
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /prompt/getVersions:
+    post:
+      tags: [ 规则配置 ]
+      summary: 指令版本历史（FR-008）
+      operationId: promptGetVersions
+      x-roles: [ ADMIN, PM ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_PromptVersionList' } } } }
+
+  /prompt/rollback:
+    post:
+      tags: [ 规则配置 ]
+      summary: 指令版本回滚（FR-008）
+      operationId: promptRollback
+      x-roles: [ ADMIN ]
+      description: 恢复指定版本内容并再生成一个新版本，不覆盖历史
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_promptRollback' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /prompt/evaluate:
+    post:
+      tags: [ 规则配置 ]
+      summary: 指令效果评估（FR-008 / BR-FB-04）
+      operationId: promptEvaluate
+      x-roles: [ ADMIN, PM ]
+      description: 按 prompt_version 分组统计确认率/误报率；对比区间任务量 <30 时返回 code=0 且 data.conclusion=sampleInsufficient
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_promptEvaluate' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_promptEvaluate' } } } }
+
+  /rule/list:
+    post:
+      tags: [ 规则配置 ]
+      summary: 评审规则列表（FR-009）
+      operationId: ruleList
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_ruleList' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_ruleList' } } } }
+
+  /rule/getById:
+    post:
+      tags: [ 规则配置 ]
+      summary: 评审规则详情（FR-009）
+      operationId: ruleGetById
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_RuleDetail' } } } }
+
+  /rule/create:
+    post:
+      tags: [ 规则配置 ]
+      summary: 创建评审规则（FR-009）
+      operationId: ruleCreate
+      x-roles: [ ADMIN, PM ]
+      description: promptTemplate 为从指令库选用的文本快照（去规范化存储，非外键）
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_ruleSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /rule/update:
+    post:
+      tags: [ 规则配置 ]
+      summary: 更新评审规则（FR-009）
+      operationId: ruleUpdate
+      x-roles: [ ADMIN, PM ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_ruleSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /rule/delete:
+    post:
+      tags: [ 规则配置 ]
+      summary: 删除评审规则（FR-009）
+      operationId: ruleDelete
+      x-roles: [ ADMIN ]
+      description: 系统内置规则（isSystem=1）禁止删除，返回 40301
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /rule/toggleStatus:
+    post:
+      tags: [ 规则配置 ]
+      summary: 切换规则启用状态（FR-009）
+      operationId: ruleToggleStatus
+      x-roles: [ ADMIN, PM ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_ToggleStatus' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /testStrategy/list:
+    post:
+      tags: [ 规则配置 ]
+      summary: 测试策略列表（FR-010）
+      operationId: testStrategyList
+      x-roles: [ ADMIN, PM, QA ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_PageOnly' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_testStrategyList' } } } }
+
+  /testStrategy/create:
+    post:
+      tags: [ 规则配置 ]
+      summary: 创建测试策略（FR-010）
+      operationId: testStrategyCreate
+      x-roles: [ ADMIN, PM ]
+      description: 设为全局默认（isDefault=1）时自动取消其它策略的默认标记
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_testStrategySave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /testStrategy/update:
+    post:
+      tags: [ 规则配置 ]
+      summary: 更新测试策略（FR-010）
+      operationId: testStrategyUpdate
+      x-roles: [ ADMIN, PM ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_testStrategySave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /testStrategy/delete:
+    post:
+      tags: [ 规则配置 ]
+      summary: 删除测试策略（FR-010）
+      operationId: testStrategyDelete
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /testStrategy/suggest:
+    post:
+      tags: [ 规则配置 ]
+      summary: QA 提交测试策略修改建议（FR-010）
+      operationId: testStrategySuggest
+      x-roles: [ QA ]
+      description: v1.0 仅记录建议，审批流未实现
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_testStrategySuggest' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /template/list:
+    post:
+      tags: [ 规则配置 ]
+      summary: 规则模板列表（FR-011）
+      operationId: templateList
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_PageOnly' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_templateList' } } } }
+
+  /template/apply:
+    post:
+      tags: [ 规则配置 ]
+      summary: 一键启用规则模板（FR-011）
+      operationId: templateApply
+      x-roles: [ ADMIN, PM ]
+      description: 批量写入 review_rule，已存在的同编号规则跳过
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_templateApply' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_templateApply' } } } }
+
+  /template/create:
+    post:
+      tags: [ 规则配置 ]
+      summary: 创建规则模板（FR-011）
+      operationId: templateCreate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_templateSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /template/update:
+    post:
+      tags: [ 规则配置 ]
+      summary: 更新规则模板（FR-011）
+      operationId: templateUpdate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_templateSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /template/delete:
+    post:
+      tags: [ 规则配置 ]
+      summary: 删除规则模板（FR-011）
+      operationId: templateDelete
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  # ── 运维管理（4） ────────────────────────────────────────────────
+  /monitor/metrics:
+    post:
+      tags: [ 运维管理 ]
+      summary: 系统监控指标（FR-012）
+      operationId: monitorMetrics
+      x-roles: [ ADMIN, OPERATOR ]
+      description: OPERATOR 为预留角色，v1.0 不实现
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_monitorMetrics' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_monitorMetrics' } } } }
+
+  /monitor/health:
+    post:
+      tags: [ 运维管理 ]
+      summary: 系统健康检查（FR-012）
+      operationId: monitorHealth
+      x-roles: [ ADMIN, OPERATOR ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Empty' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_monitorHealth' } } } }
+
+  /audit/list:
+    post:
+      tags: [ 运维管理 ]
+      summary: 审计日志列表（FR-013）
+      operationId: auditList
+      x-roles: [ ADMIN, AUDITOR ]
+      description: 默认保留 180 天，可由 audit.retention.days 配置
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_auditList' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_auditList' } } } }
+
+  /audit/export:
+    post:
+      tags: [ 运维管理 ]
+      summary: 审计日志导出 CSV（FR-013）
+      operationId: auditExport
+      x-roles: [ ADMIN, AUDITOR ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_auditList' } } } }
+      responses:
+        '200': { description: CSV 文件流（前端需 responseType blob） }
+
+  # ── 权限管理（24） ───────────────────────────────────────────────
+  /user/list:
+    post:
+      tags: [ 权限管理 ]
+      summary: 用户列表（FR-014）
+      operationId: userList
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_userList' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_userList' } } } }
+
+  /user/getById:
+    post:
+      tags: [ 权限管理 ]
+      summary: 用户详情（FR-014）
+      operationId: userGetById
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_UserDetail' } } } }
+
+  /user/create:
+    post:
+      tags: [ 权限管理 ]
+      summary: 创建用户（FR-014）
+      operationId: userCreate
+      x-roles: [ ADMIN ]
+      description: 新建用户默认绑定 DEVELOPER 角色；密码 BCrypt 存储
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_userSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /user/update:
+    post:
+      tags: [ 权限管理 ]
+      summary: 更新用户（FR-014）
+      operationId: userUpdate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_userSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /user/delete:
+    post:
+      tags: [ 权限管理 ]
+      summary: 删除用户（FR-014，逻辑删除）
+      operationId: userDelete
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /user/resetPassword:
+    post:
+      tags: [ 权限管理 ]
+      summary: 重置密码（FR-014）
+      operationId: userResetPassword
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_userResetPassword' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /user/assignRoles:
+    post:
+      tags: [ 权限管理 ]
+      summary: 分配用户角色（FR-014 / FR-015）
+      operationId: userAssignRoles
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_userAssignRoles' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /user/sync:
+    post:
+      tags: [ 权限管理 ]
+      summary: LDAP/OIDC 用户同步（FR-014）
+      operationId: userSync
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_userSync' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_userSync' } } } }
+
+  /role/list:
+    post:
+      tags: [ 权限管理 ]
+      summary: 角色列表（FR-015）
+      operationId: roleList
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_PageOnly' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_roleList' } } } }
+
+  /role/getById:
+    post:
+      tags: [ 权限管理 ]
+      summary: 角色详情（FR-015）
+      operationId: roleGetById
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_RoleDetail' } } } }
+
+  /role/create:
+    post:
+      tags: [ 权限管理 ]
+      summary: 创建角色（FR-015）
+      operationId: roleCreate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_roleSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /role/update:
+    post:
+      tags: [ 权限管理 ]
+      summary: 更新角色（FR-015）
+      operationId: roleUpdate
+      x-roles: [ ADMIN ]
+      description: 内置角色不可删除、不可修改 roleCode，但可调整权限范围（含预留角色 AUDITOR / OPERATOR）
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_roleSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /role/delete:
+    post:
+      tags: [ 权限管理 ]
+      summary: 删除角色（FR-015）
+      operationId: roleDelete
+      x-roles: [ ADMIN ]
+      description: 内置角色（isSystem=1）禁止删除，返回 40301
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /role/getPermissions:
+    post:
+      tags: [ 权限管理 ]
+      summary: 查询角色权限（FR-015）
+      operationId: roleGetPermissions
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_roleGetPermissions' } } } }
+
+  /role/assignPermissions:
+    post:
+      tags: [ 权限管理 ]
+      summary: 分配角色权限（FR-015）
+      operationId: roleAssignPermissions
+      x-roles: [ ADMIN ]
+      description: 权限变更后实时生效，无需用户重新登录；变更需记录审计日志
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_roleAssignPermissions' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /dept/tree:
+    post:
+      tags: [ 权限管理 ]
+      summary: 部门树（FR-016）
+      operationId: deptTree
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Empty' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_deptTree' } } } }
+
+  /dept/getById:
+    post:
+      tags: [ 权限管理 ]
+      summary: 部门详情（FR-016）
+      operationId: deptGetById
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_DeptDetail' } } } }
+
+  /dept/create:
+    post:
+      tags: [ 权限管理 ]
+      summary: 创建部门（FR-016）
+      operationId: deptCreate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_deptSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /dept/update:
+    post:
+      tags: [ 权限管理 ]
+      summary: 更新部门（FR-016）
+      operationId: deptUpdate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_deptSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /dept/delete:
+    post:
+      tags: [ 权限管理 ]
+      summary: 删除部门（FR-016）
+      operationId: deptDelete
+      x-roles: [ ADMIN ]
+      description: 删除前校验下级部门与关联用户，存在则拒绝并返回 40001
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /dataPermission/list:
+    post:
+      tags: [ 权限管理 ]
+      summary: 数据权限列表（FR-017）
+      operationId: dataPermissionList
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_PageOnly' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_dataPermissionList' } } } }
+
+  /dataPermission/create:
+    post:
+      tags: [ 权限管理 ]
+      summary: 创建数据权限（FR-017）
+      operationId: dataPermissionCreate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_dataPermissionSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /dataPermission/update:
+    post:
+      tags: [ 权限管理 ]
+      summary: 更新数据权限（FR-017）
+      operationId: dataPermissionUpdate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_dataPermissionSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /dataPermission/delete:
+    post:
+      tags: [ 权限管理 ]
+      summary: 删除数据权限（FR-017）
+      operationId: dataPermissionDelete
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  # ── 系统配置（15） ───────────────────────────────────────────────
+  /platform/list:
+    post:
+      tags: [ 系统配置 ]
+      summary: 平台接入列表（FR-018）
+      operationId: platformList
+      x-roles: [ ADMIN ]
+      description: accessToken 与 webhookSecret 不回显明文；表单留空表示不修改
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_PageOnly' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_platformList' } } } }
+
+  /platform/create:
+    post:
+      tags: [ 系统配置 ]
+      summary: 创建平台接入（FR-018）
+      operationId: platformCreate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_platformSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /platform/update:
+    post:
+      tags: [ 系统配置 ]
+      summary: 更新平台接入（FR-018）
+      operationId: platformUpdate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_platformSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /platform/delete:
+    post:
+      tags: [ 系统配置 ]
+      summary: 删除平台接入（FR-018）
+      operationId: platformDelete
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /platform/testConnection:
+    post:
+      tags: [ 系统配置 ]
+      summary: 平台连通性测试（FR-018）
+      operationId: platformTestConnection
+      x-roles: [ ADMIN ]
+      description: 未保存也可测试
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_platformTestConnection' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_TestResult' } } } }
+
+  /model/list:
+    post:
+      tags: [ 系统配置 ]
+      summary: 模型配置列表（FR-019）
+      operationId: modelList
+      x-roles: [ ADMIN ]
+      description: apiKey 不回显明文
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_PageOnly' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_modelList' } } } }
+
+  /model/create:
+    post:
+      tags: [ 系统配置 ]
+      summary: 创建模型配置（FR-019）
+      operationId: modelCreate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_modelSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /model/update:
+    post:
+      tags: [ 系统配置 ]
+      summary: 更新模型配置（FR-019）
+      operationId: modelUpdate
+      x-roles: [ ADMIN ]
+      description: 配置变更后需重新加载指令模板（模板本地缓存 5min）
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_modelSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /model/delete:
+    post:
+      tags: [ 系统配置 ]
+      summary: 删除模型配置（FR-019）
+      operationId: modelDelete
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /model/testConnection:
+    post:
+      tags: [ 系统配置 ]
+      summary: 模型连通性测试（FR-019）
+      operationId: modelTestConnection
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_modelTestConnection' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_TestResult' } } } }
+
+  /notification/list:
+    post:
+      tags: [ 系统配置 ]
+      summary: 通知设置列表（FR-020）
+      operationId: notificationList
+      x-roles: [ ADMIN ]
+      description: webhookUrl 与 secret 不回显明文
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_PageOnly' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_notificationList' } } } }
+
+  /notification/create:
+    post:
+      tags: [ 系统配置 ]
+      summary: 创建通知设置（FR-020）
+      operationId: notificationCreate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_notificationSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /notification/update:
+    post:
+      tags: [ 系统配置 ]
+      summary: 更新通知设置（FR-020）
+      operationId: notificationUpdate
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_notificationSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /notification/delete:
+    post:
+      tags: [ 系统配置 ]
+      summary: 删除通知设置（FR-020）
+      operationId: notificationDelete
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /notification/testSend:
+    post:
+      tags: [ 系统配置 ]
+      summary: 通知发送测试（FR-020）
+      operationId: notificationTestSend
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_TestResult' } } } }
+
+  # ── 成本管理（7） ────────────────────────────────────────────────
+  /cost/quotaList:
+    post:
+      tags: [ 成本管理 ]
+      summary: 配额规则列表（FR-021）
+      operationId: costQuotaList
+      x-roles: [ ADMIN, PM ]
+      description: PM 仅本部门/本项目；只读
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_costQuotaList' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_costQuotaList' } } } }
+
+  /cost/getQuota:
+    post:
+      tags: [ 成本管理 ]
+      summary: 配额规则详情（FR-021）
+      operationId: costGetQuota
+      x-roles: [ ADMIN, PM ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_CostQuota' } } } }
+
+  /cost/createQuota:
+    post:
+      tags: [ 成本管理 ]
+      summary: 创建配额规则（FR-021）
+      operationId: costCreateQuota
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_costQuotaSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /cost/updateQuota:
+    post:
+      tags: [ 成本管理 ]
+      summary: 更新配额规则（FR-021）
+      operationId: costUpdateQuota
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_costQuotaSave' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_IdResult' } } } }
+
+  /cost/deleteQuota:
+    post:
+      tags: [ 成本管理 ]
+      summary: 删除配额规则（FR-021）
+      operationId: costDeleteQuota
+      x-roles: [ ADMIN ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Id' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /cost/consumption:
+    post:
+      tags: [ 成本管理 ]
+      summary: Token 消耗统计（FR-021 / BR-COST-01）
+      operationId: costConsumption
+      x-roles: [ ADMIN, PM ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_costConsumption' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_costConsumption' } } } }
+
+  /cost/quotaStatus:
+    post:
+      tags: [ 成本管理 ]
+      summary: 配额状态（FR-021 / BR-COST-02~03）
+      operationId: costQuotaStatus
+      x-roles: [ ADMIN, PM ]
+      description: '实时计算（不落库）：NORMAL <80% / WARN ≥80% / CRITICAL ≥90% / BLOCKED =100%'
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_costQuotaStatus' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_costQuotaStatus' } } } }
+
+  # ── 认证（4） ────────────────────────────────────────────────────
+  /auth/login:
+    post:
+      tags: [ 认证 ]
+      summary: 用户登录
+      operationId: authLogin
+      security: [ ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_authLogin' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_authLogin' } } } }
+
+  /auth/refreshToken:
+    post:
+      tags: [ 认证 ]
+      summary: 刷新 Token
+      operationId: authRefreshToken
+      security: [ ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_authRefreshToken' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_authLogin' } } } }
+
+  /auth/logout:
+    post:
+      tags: [ 认证 ]
+      summary: 用户登出
+      operationId: authLogout
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Empty' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /auth/getCurrentUser:
+    post:
+      tags: [ 认证 ]
+      summary: 获取当前用户信息与菜单树
+      operationId: authGetCurrentUser
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      description: 返回 data.menus 菜单树（sys_menu），前端据此动态生成路由（前端设计说明书 §4.1）
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_Empty' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_authGetCurrentUser' } } } }
+
+  # ── 核心引擎（4） ────────────────────────────────────────────────
+  /webhook/receive:
+    post:
+      tags: [ 核心引擎 ]
+      summary: Git 平台 Webhook 入站回调（FR-022）
+      operationId: webhookReceive
+      security: [ ]
+      description: |
+        无 Bearer 认证，改用平台签名校验（GitLab X-Gitlab-Token 直接比对；GitHub X-Hub-Signature-256 / Gitea X-Gitea-Signature 用 HMAC-SHA256，并附加 ±300s 时间窗）。
+        仅做签名校验 + 幂等（事件级 24h + 业务级 60s 窗口，BR-W-07/BR-W-08）+ 建任务 + 入队，**不在接口线程执行 Diff 解析或 LLM 调用**（BR-W-02，P99 ≤200ms）。
+        请求体为 Git 平台原始 Payload，结构随平台不同，此处以开放对象描述；非目标事件直接返回 200 ignored。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookPayload' }
+      responses:
+        '200':
+          description: 处理成功 / 非目标事件 / 重复请求，均返回 200（BR-W-09）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookAcceptedResponse' }
+              examples:
+                accepted:
+                  summary: 校验通过，任务已入队
+                  value: { code: 0, message: 'success', data: { status: 'accepted', taskId: 123 }, requestId: 'uuid' }
+                ignored:
+                  summary: 非目标事件
+                  value: { code: 0, message: 'success', data: { status: 'ignored', reason: 'not mr event' }, requestId: 'uuid' }
+                duplicate:
+                  summary: 幂等拦截
+                  value: { code: 0, message: 'success', data: { status: 'duplicate', existTaskId: 123 }, requestId: 'uuid' }
+        '400': { description: 参数错误（40001 invalid payload） }
+        '401': { description: 签名验证失败（40301 invalid signature），不入 Body、写审计日志 }
+        '503': { description: MQ 满或系统过载（50001 queue full），触发平台重试 }
+
+  /webhook/retry:
+    post:
+      tags: [ 核心引擎 ]
+      summary: Webhook 侧人工重试（FR-022）
+      operationId: webhookRetry
+      x-roles: [ ADMIN, PM ]
+      description: service 仅发送 Kafka TOPIC_REVIEW_RETRY，由 worker 消费执行（HLD 红线二）
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_webhookRetry' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /feedback/report:
+    post:
+      tags: [ 核心引擎 ]
+      summary: 评审意见反馈上报（FR-026）
+      operationId: feedbackReport
+      x-roles: [ ADMIN, PM, QA, DEVELOPER ]
+      description: 驱动误报特征库（BR-FB-01）与确认样本库（BR-FB-03）；经 TOPIC_FEEDBACK 异步处理，不阻塞用户操作
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_feedbackReport' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_OpResult' } } } }
+
+  /feedback/feedbackReport:
+    post:
+      tags: [ 核心引擎 ]
+      summary: 模型效果周报（FR-026 / BR-FB-04）
+      operationId: feedbackFeedbackReport
+      x-roles: [ ADMIN, PM, QA ]
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/ReqBody_feedbackFeedbackReport' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/RespBody_feedbackFeedbackReport' } } } }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT Token，有效期 7 天，支持 Refresh Token 续期（SRS §4.2）
+
+  schemas:
+    # ── 统一封装 ───────────────────────────────────────────────────
+    RpcEnvelopeRequest:
+      type: object
+      description: 所有 RPC 请求的公共外层，业务参数一律置于 param
+      properties:
+        requestId: { type: string, format: uuid, description: 客户端生成用于幂等与链路追踪; 缺省由服务端补全 }
+
+    RpcEnvelopeResponse:
+      type: object
+      description: 所有 RPC 响应的公共外层; 业务错误由 code 表达而非 HTTP 状态码
+      required: [ code, message, requestId ]
+      properties:
+        code:
+          type: integer
+          format: int32
+          description: '0=成功; 40001=参数校验失败; 40101=未登录或Token过期; 40301=无权限; 40401=资源不存在; 50001=系统内部错误; 50002=LLM调用失败'
+          examples: [ 0 ]
+        message: { type: string, description: 提示信息; 参数错误时可携带字段级明细, examples: [ 'success' ] }
+        requestId: { type: string, format: uuid, description: 与请求一致或服务端生成 }
+
+    OpResult: { type: object, description: 写操作成功返回; 无附加数据 }
+    IdResult:
+      type: object
+      description: 创建类操作返回的主键
+      required: [ id ]
+      properties: { id: { type: integer, format: int64 } }
+
+    PageRequest:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1, default: 1 }
+        size: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+    TimeRange:
+      type: object
+      description: 时间范围; 缺省为近 30 天
+      properties:
+        start: { type: string, format: date, examples: [ '2026-08-09' ] }
+        end: { type: string, format: date, examples: [ '2026-09-08' ] }
+
+    IdParam:
+      type: object
+      required: [ id ]
+      properties: { id: { type: integer, format: int64 } }
+
+    TaskIdParam:
+      type: object
+      required: [ taskId ]
+      properties: { taskId: { type: integer, format: int64, examples: [ 10023 ] } }
+
+    ToggleStatusParam:
+      type: object
+      required: [ id, status ]
+      properties:
+        id: { type: integer, format: int64 }
+        status: { type: integer, enum: [ 0, 1 ], description: '1=启用; 0=停用' }
+
+    # ── 枚举 ───────────────────────────────────────────────────────
+    SubStatus:
+      type: string
+      description: 任务业务状态唯一口径，共 14 个（review_task.sub_status）
+      enum: [ RECEIVED, PARSING, QUEUED, ANALYZING, GENERATING_TEST, WRITING_BACK, RETRYING, TIMEOUT, COMPLETED, PARTIAL_SUCCESS, DEGRADED, FAILED, CANCELLED, SKIPPED_QUOTA ]
+    MainStatus:
+      type: integer
+      description: '任务主状态 review_task.status; 0-待处理/1-处理中/2-已完成/3-失败/4-已取消; 仅用于统计聚合'
+      enum: [ 0, 1, 2, 3, 4 ]
+    Dimension: { type: string, description: 评审维度, enum: [ BUG, PERFORMANCE, SECURITY, STYLE, READABILITY ] }
+    Severity: { type: string, description: 严重等级, enum: [ BLOCKER, CRITICAL, MINOR ] }
+    RiskLevel: { type: string, description: 风险点等级, enum: [ HIGH, MEDIUM, LOW ] }
+    Scenario: { type: string, description: 测试覆盖场景, enum: [ POSITIVE, BOUNDARY, EXCEPTION ] }
+    ConfirmStatus: { type: integer, description: '评审意见确认状态; 0-待确认/1-有效/2-误报', enum: [ 0, 1, 2 ] }
+    VerifyStatus: { type: integer, description: '测试用例验证状态; 0-待验证/1-已通过/2-已失败', enum: [ 0, 1, 2 ] }
+    CaseSource: { type: integer, description: '测试用例来源; 0-AI生成/1-手动补充', enum: [ 0, 1 ] }
+    PromptCategory: { type: string, description: 指令分类, enum: [ SYSTEM, REVIEW, TEST_GEN, COMMON ] }
+    EnableStatus: { type: integer, description: '启用状态; 1-启用/0-停用', enum: [ 0, 1 ] }
+    TriggeredBy: { type: integer, description: '触发方式; 0-Webhook/1-手动', enum: [ 0, 1 ] }
+    FallbackMode: { type: string, description: 降级模式（FR-025）, enum: [ STANDARD, STREAMLINED, QUICK_SCAN, SHARDED ] }
+    ChangeType: { type: string, description: 变更类型（阶段一输出）, enum: [ FEATURE, BUGFIX, REFACTOR, CHORE, OTHER ] }
+    FeedbackType: { type: string, description: '反馈类型; CONFIRM-确认有效/REJECT-标记误报', enum: [ CONFIRM, REJECT ] }
+    PlatformType: { type: string, description: 代码托管平台类型, enum: [ GITLAB, GITHUB, GITEA ] }
+    ModelScene: { type: string, description: '模型适用场景; REVIEW-评审/TEST_GEN-测试生成', enum: [ REVIEW, TEST_GEN ] }
+    NotifyChannel: { type: string, description: 通知渠道, enum: [ WECOM, DINGTALK, FEISHU, EMAIL ] }
+    TriggerCondition: { type: string, description: 通知触发条件, enum: [ REVIEW_COMPLETED, BLOCKER_FOUND, TASK_FAILED, QUOTA_WARNING ] }
+    SubjectType: { type: string, description: '配额/消耗主体类型', enum: [ DEPT, PROJECT ] }
+    QuotaPeriod: { type: string, description: 配额周期（BR-COST-04）, enum: [ MONTH, WEEK ] }
+    ResetType: { type: string, description: '配额重置方式; AUTO-自动/MANUAL-手动', enum: [ AUTO, MANUAL ] }
+    QuotaStatusEnum: { type: string, description: '配额状态; NORMAL<80% / WARN≥80% / CRITICAL≥90% / BLOCKED=100%（SRS FR-021）', enum: [ NORMAL, WARN, CRITICAL, BLOCKED ] }
+    PermSubjectType: { type: string, description: 数据权限主体类型, enum: [ ROLE, DEPT ] }
+    ResourceType: { type: string, description: 数据权限资源类型, enum: [ REVIEW_TASK, DASHBOARD, RULE ] }
+    DataScope: { type: string, description: '数据可见范围; ALL-全部/DEPT_AND_SUB-本部门及下级/SELF-仅本人', enum: [ ALL, DEPT_AND_SUB, SELF ] }
+    RoleCode: { type: string, description: '角色标识; AUDITOR/OPERATOR 为预留角色 v1.0 不实现', enum: [ ADMIN, PM, QA, DEVELOPER, AUDITOR, OPERATOR ] }
+    Granularity: { type: string, description: 质量趋势时间粒度, enum: [ DAY, WEEK, MONTH ] }
+    ReviewTraceNodeType: { type: string, description: 变更追溯图谱节点类型, enum: [ FILE, REQUIREMENT, ISSUE, TESTCASE ] }
+
+    # ── 请求体 wrapper（业务参数统一置于 param） ────────────────────
+    ReqBody_Empty: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' } ] }
+    ReqBody_Id: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/IdParam' } } } ] }
+    ReqBody_TaskId: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/TaskIdParam' } } } ] }
+    ReqBody_PageOnly: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/PageRequest' } } } ] }
+    ReqBody_ToggleStatus: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/ToggleStatusParam' } } } ] }
+    ReqBody_dashboardSummary: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/DashboardSummaryParam' } } } ] }
+    ReqBody_dashboardIssueDistribution: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/DashboardIssueDistributionParam' } } } ] }
+    ReqBody_dashboardQualityTrend: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/DashboardQualityTrendParam' } } } ] }
+    ReqBody_dashboardRepoAnalysis: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/DashboardRepoAnalysisParam' } } } ] }
+    ReqBody_reviewList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/ReviewListParam' } } } ] }
+    ReqBody_reviewGetReport: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/TaskIdParam' } } } ] }
+    ReqBody_reviewConfirmComment: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/ReviewConfirmCommentParam' } } } ] }
+    ReqBody_reviewRejectComment: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/ReviewRejectCommentParam' } } } ] }
+    ReqBody_reviewAddTestCase: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/AddTestCaseParam' } } } ] }
+    ReqBody_reviewUpdateTestCaseStatus: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/UpdateTestCaseStatusParam' } } } ] }
+    ReqBody_reviewTrigger: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/ReviewTriggerParam' } } } ] }
+    ReqBody_reviewRetry: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/ReviewRetryParam' } } } ] }
+    ReqBody_promptList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/PromptListParam' } } } ] }
+    ReqBody_promptSave: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/PromptSaveParam' } } } ] }
+    ReqBody_promptRollback: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/PromptRollbackParam' } } } ] }
+    ReqBody_promptEvaluate: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/PromptEvaluateParam' } } } ] }
+    ReqBody_ruleList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/RuleListParam' } } } ] }
+    ReqBody_ruleSave: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/RuleSaveParam' } } } ] }
+    ReqBody_testStrategySave: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/TestStrategySaveParam' } } } ] }
+    ReqBody_testStrategySuggest: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/TestStrategySuggestParam' } } } ] }
+    ReqBody_templateApply: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/TemplateApplyParam' } } } ] }
+    ReqBody_templateSave: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/TemplateSaveParam' } } } ] }
+    ReqBody_monitorMetrics: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/MonitorMetricsParam' } } } ] }
+    ReqBody_auditList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/AuditListParam' } } } ] }
+    ReqBody_userList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/UserListParam' } } } ] }
+    ReqBody_userSave: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/UserSaveParam' } } } ] }
+    ReqBody_userResetPassword: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/UserResetPasswordParam' } } } ] }
+    ReqBody_userAssignRoles: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/UserAssignRolesParam' } } } ] }
+    ReqBody_userSync: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/UserSyncParam' } } } ] }
+    ReqBody_roleSave: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/RoleSaveParam' } } } ] }
+    ReqBody_roleAssignPermissions: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/RoleAssignPermissionsParam' } } } ] }
+    ReqBody_deptSave: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/DeptSaveParam' } } } ] }
+    ReqBody_dataPermissionSave: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/DataPermissionSaveParam' } } } ] }
+    ReqBody_platformSave: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/PlatformSaveParam' } } } ] }
+    ReqBody_platformTestConnection: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/PlatformTestConnectionParam' } } } ] }
+    ReqBody_modelSave: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/ModelSaveParam' } } } ] }
+    ReqBody_modelTestConnection: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/ModelTestConnectionParam' } } } ] }
+    ReqBody_notificationSave: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/NotificationSaveParam' } } } ] }
+    ReqBody_costQuotaList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/CostQuotaListParam' } } } ] }
+    ReqBody_costQuotaSave: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/CostQuotaSaveParam' } } } ] }
+    ReqBody_costConsumption: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/CostConsumptionParam' } } } ] }
+    ReqBody_costQuotaStatus: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/CostQuotaStatusParam' } } } ] }
+    ReqBody_authLogin: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/AuthLoginParam' } } } ] }
+    ReqBody_authRefreshToken: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/AuthRefreshTokenParam' } } } ] }
+    ReqBody_webhookRetry: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/WebhookRetryParam' } } } ] }
+    ReqBody_feedbackReport: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/FeedbackReportParam' } } } ] }
+    ReqBody_feedbackFeedbackReport: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeRequest' }, { type: object, properties: { param: { $ref: '#/components/schemas/FeedbackFeedbackReportParam' } } } ] }
+
+    # ── 响应体 wrapper ─────────────────────────────────────────────
+    RespBody_OpResult: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/OpResult' } } } ] }
+    RespBody_IdResult: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/IdResult' } } } ] }
+    RespBody_TestResult: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/TestResultData' } } } ] }
+    RespBody_dashboardSummary: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/DashboardSummaryData' } } } ] }
+    RespBody_dashboardIssueDistribution: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/DashboardIssueDistributionData' } } } ] }
+    RespBody_dashboardQualityTrend: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/DashboardQualityTrendData' } } } ] }
+    RespBody_dashboardRepoAnalysis: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/DashboardRepoAnalysisData' } } } ] }
+    RespBody_reviewList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/ReviewListData' } } } ] }
+    RespBody_reviewGetReport: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/ReviewReportData' } } } ] }
+    RespBody_ChangeAnalysis: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/ChangeAnalysisData' } } } ] }
+    RespBody_ReviewCommentList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/ReviewCommentListData' } } } ] }
+    RespBody_TestCaseList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/TestCaseListData' } } } ] }
+    RespBody_reviewGetTrace: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/ReviewTraceData' } } } ] }
+    RespBody_reviewTrigger: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/TaskBriefData' } } } ] }
+    RespBody_promptList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PageResultOfPromptItem' } } } ] }
+    RespBody_PromptDetail: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PromptItem' } } } ] }
+    RespBody_PromptVersionList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PromptVersionListData' } } } ] }
+    RespBody_promptEvaluate: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PromptEvaluateData' } } } ] }
+    RespBody_ruleList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PageResultOfRuleItem' } } } ] }
+    RespBody_RuleDetail: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/RuleItem' } } } ] }
+    RespBody_testStrategyList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PageResultOfTestStrategyItem' } } } ] }
+    RespBody_templateList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PageResultOfTemplateItem' } } } ] }
+    RespBody_templateApply: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/TemplateApplyData' } } } ] }
+    RespBody_monitorMetrics: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/MonitorMetricsData' } } } ] }
+    RespBody_monitorHealth: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/MonitorHealthData' } } } ] }
+    RespBody_auditList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PageResultOfAuditLogItem' } } } ] }
+    RespBody_userList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PageResultOfUserItem' } } } ] }
+    RespBody_UserDetail: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/UserItem' } } } ] }
+    RespBody_userSync: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/UserSyncData' } } } ] }
+    RespBody_roleList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PageResultOfRoleItem' } } } ] }
+    RespBody_RoleDetail: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/RoleItem' } } } ] }
+    RespBody_roleGetPermissions: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/RolePermissionsData' } } } ] }
+    RespBody_deptTree: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/DeptTreeData' } } } ] }
+    RespBody_DeptDetail: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/DeptNode' } } } ] }
+    RespBody_dataPermissionList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PageResultOfDataPermissionItem' } } } ] }
+    RespBody_platformList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PageResultOfPlatformItem' } } } ] }
+    RespBody_modelList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PageResultOfModelItem' } } } ] }
+    RespBody_notificationList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PageResultOfNotificationItem' } } } ] }
+    RespBody_costQuotaList: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/PageResultOfCostQuotaItem' } } } ] }
+    RespBody_CostQuota: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/CostQuotaItem' } } } ] }
+    RespBody_costConsumption: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/CostConsumptionData' } } } ] }
+    RespBody_costQuotaStatus: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/CostQuotaStatusData' } } } ] }
+    RespBody_authLogin: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/AuthLoginData' } } } ] }
+    RespBody_authGetCurrentUser: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/CurrentUserData' } } } ] }
+    RespBody_feedbackFeedbackReport: { allOf: [ { $ref: '#/components/schemas/RpcEnvelopeResponse' }, { type: object, properties: { data: { $ref: '#/components/schemas/FeedbackFeedbackReportData' } } } ] }
+
+    # ── 通用分页 ───────────────────────────────────────────────────
+    PageResultBase:
+      type: object
+      required: [ total, page, size ]
+      properties:
+        total: { type: integer, format: int64 }
+        page: { type: integer }
+        size: { type: integer }
+    PageResultOfPromptItem: { allOf: [ { $ref: '#/components/schemas/PageResultBase' }, { type: object, properties: { list: { type: array, items: { $ref: '#/components/schemas/PromptItem' } } } } ] }
+    PageResultOfRuleItem: { allOf: [ { $ref: '#/components/schemas/PageResultBase' }, { type: object, properties: { list: { type: array, items: { $ref: '#/components/schemas/RuleItem' } } } } ] }
+    PageResultOfTestStrategyItem: { allOf: [ { $ref: '#/components/schemas/PageResultBase' }, { type: object, properties: { list: { type: array, items: { $ref: '#/components/schemas/TestStrategyItem' } } } } ] }
+    PageResultOfTemplateItem: { allOf: [ { $ref: '#/components/schemas/PageResultBase' }, { type: object, properties: { list: { type: array, items: { $ref: '#/components/schemas/TemplateItem' } } } } ] }
+    PageResultOfAuditLogItem: { allOf: [ { $ref: '#/components/schemas/PageResultBase' }, { type: object, properties: { list: { type: array, items: { $ref: '#/components/schemas/AuditLogItem' } } } } ] }
+    PageResultOfUserItem: { allOf: [ { $ref: '#/components/schemas/PageResultBase' }, { type: object, properties: { list: { type: array, items: { $ref: '#/components/schemas/UserItem' } } } } ] }
+    PageResultOfRoleItem: { allOf: [ { $ref: '#/components/schemas/PageResultBase' }, { type: object, properties: { list: { type: array, items: { $ref: '#/components/schemas/RoleItem' } } } } ] }
+    PageResultOfDataPermissionItem: { allOf: [ { $ref: '#/components/schemas/PageResultBase' }, { type: object, properties: { list: { type: array, items: { $ref: '#/components/schemas/DataPermissionItem' } } } } ] }
+    PageResultOfPlatformItem: { allOf: [ { $ref: '#/components/schemas/PageResultBase' }, { type: object, properties: { list: { type: array, items: { $ref: '#/components/schemas/PlatformItem' } } } } ] }
+    PageResultOfModelItem: { allOf: [ { $ref: '#/components/schemas/PageResultBase' }, { type: object, properties: { list: { type: array, items: { $ref: '#/components/schemas/ModelItem' } } } } ] }
+    PageResultOfNotificationItem: { allOf: [ { $ref: '#/components/schemas/PageResultBase' }, { type: object, properties: { list: { type: array, items: { $ref: '#/components/schemas/NotificationItem' } } } } ] }
+    PageResultOfCostQuotaItem: { allOf: [ { $ref: '#/components/schemas/PageResultBase' }, { type: object, properties: { list: { type: array, items: { $ref: '#/components/schemas/CostQuotaItem' } } } } ] }
+
+    # ── 评审概览 ───────────────────────────────────────────────────
+    DashboardSummaryParam:
+      type: object
+      description: 缺省为近 30 天全量
+      properties:
+        timeRange: { $ref: '#/components/schemas/TimeRange' }
+        repoId: { type: integer, format: int64, description: 可选仓库过滤 }
+    DashboardSummaryData:
+      type: object
+      properties:
+        totalReviews: { type: integer, format: int64 }
+        totalIssues: { type: integer, format: int64 }
+        averageScore: { type: number, description: '综合评分 0~100; 100-(Blocker×10+Critical×5+Minor×1)，下限 0' }
+        testCoverage: { type: number, description: 百分比数值，如 76.5 }
+        trend:
+          type: object
+          properties:
+            reviewCount: { type: string, examples: [ '+12%' ] }
+            issueCount: { type: string, examples: [ '-5%' ] }
+            scoreTrend: { type: string, examples: [ '+3' ] }
+    DashboardIssueDistributionParam:
+      type: object
+      properties:
+        timeRange: { $ref: '#/components/schemas/TimeRange' }
+        repoId: { type: integer, format: int64 }
+    DashboardIssueDistributionData:
+      type: object
+      properties:
+        byDimension:
+          type: array
+          items: { type: object, properties: { dimension: { $ref: '#/components/schemas/Dimension' }, count: { type: integer } } }
+        bySeverity:
+          type: array
+          items: { type: object, properties: { severity: { $ref: '#/components/schemas/Severity' }, count: { type: integer } } }
+    DashboardQualityTrendParam:
+      type: object
+      properties:
+        granularity: { $ref: '#/components/schemas/Granularity' }
+        timeRange: { $ref: '#/components/schemas/TimeRange' }
+    DashboardQualityTrendData:
+      type: object
+      properties:
+        scoreTrend: { type: array, items: { type: object, properties: { date: { type: string }, score: { type: number } } } }
+        issueTrend: { type: array, items: { type: object, properties: { date: { type: string }, count: { type: integer } } } }
+    DashboardRepoAnalysisParam:
+      type: object
+      properties: { timeRange: { $ref: '#/components/schemas/TimeRange' } }
+    DashboardRepoAnalysisData:
+      type: object
+      properties:
+        repos:
+          type: array
+          items:
+            type: object
+            properties:
+              repoId: { type: integer, format: int64 }
+              repoName: { type: string }
+              reviewCount: { type: integer }
+              issueCount: { type: integer }
+              averageScore: { type: number }
+              activityScore: { type: number }
+
+    # ── 智能分析 ───────────────────────────────────────────────────
+    ReviewListParam:
+      allOf:
+        - $ref: '#/components/schemas/PageRequest'
+        - type: object
+          properties:
+            repoName: { type: string }
+            authorId: { type: integer, format: int64 }
+            status: { $ref: '#/components/schemas/SubStatus' }
+            startTime: { type: string, format: date }
+            endTime: { type: string, format: date }
+            keyword: { type: string, description: 任务编号/MR 标题模糊匹配 }
+    TaskItem:
+      type: object
+      properties:
+        taskId: { type: integer, format: int64 }
+        taskNo: { type: string, examples: [ 'TR-20260908-001' ] }
+        repoName: { type: string }
+        mrTitle: { type: string }
+        author: { type: string }
+        triggerTime: { type: string, format: 'date-time' }
+        status: { $ref: '#/components/schemas/SubStatus' }
+        statusMain: { $ref: '#/components/schemas/MainStatus' }
+        score: { type: number }
+        hasTestCases: { type: boolean }
+        fallbackMode: { $ref: '#/components/schemas/FallbackMode' }
+        triggeredBy: { $ref: '#/components/schemas/TriggeredBy' }
+    ReviewListData:
+      allOf:
+        - $ref: '#/components/schemas/PageResultBase'
+        - type: object
+          properties: { list: { type: array, items: { $ref: '#/components/schemas/TaskItem' } } }
+    TaskBrief:
+      type: object
+      properties:
+        taskId: { type: integer, format: int64 }
+        taskNo: { type: string }
+        repoName: { type: string }
+        mrTitle: { type: string }
+        status: { $ref: '#/components/schemas/SubStatus' }
+        score: { type: number }
+        fallbackMode: { $ref: '#/components/schemas/FallbackMode' }
+    RiskPoint: { type: object, required: [ desc, level ], properties: { desc: { type: string }, level: { $ref: '#/components/schemas/RiskLevel' } } }
+    ChangeAnalysisData:
+      type: object
+      description: 阶段一输出（review_change_analysis），与 Prompt 设计说明书 §4.1.3 输出 Schema 对齐
+      properties:
+        changeType: { $ref: '#/components/schemas/ChangeType' }
+        mainLanguage: { type: string, examples: [ 'Java' ] }
+        fromCache: { type: boolean, description: '命中 ANALYSIS_INTENT 缓存(BR-05); 前端据此展示「结果来自缓存」' }
+        summary: { type: string }
+        affectedFiles: { type: array, items: { type: string } }
+        implicitRequirements: { type: array, items: { type: string } }
+        riskPoints: { type: array, items: { $ref: '#/components/schemas/RiskPoint' } }
+    ReviewCommentItem:
+      type: object
+      description: 与 review_comment 表及 Prompt 设计说明书 §4.2.3 输出 Schema 对齐
+      properties:
+        id: { type: integer, format: int64 }
+        filePath: { type: string }
+        lineNo: { type: integer, description: 新文件 1-indexed 行号（SRS §5.3.1） }
+        dimension: { $ref: '#/components/schemas/Dimension' }
+        severity: { $ref: '#/components/schemas/Severity' }
+        title: { type: string }
+        description: { type: string }
+        suggestion: { type: string }
+        confidence: { type: number, description: 'LLM 置信度 0~1; <0.5 的输出在落库前已过滤' }
+        ruleCode: { type: string, description: 命中的规则编号; 通用问题留空 }
+        confirmStatus: { $ref: '#/components/schemas/ConfirmStatus' }
+    ReviewCommentListData:
+      type: object
+      properties: { comments: { type: array, items: { $ref: '#/components/schemas/ReviewCommentItem' } } }
+    TestCaseItem:
+      type: object
+      description: 与 test_case 表及 Prompt 设计说明书 §4.3.3 输出 Schema 对齐
+      properties:
+        id: { type: integer, format: int64 }
+        caseName: { type: string }
+        scenario: { $ref: '#/components/schemas/Scenario' }
+        preCondition: { type: string }
+        steps: { type: string }
+        expectedResult: { type: string }
+        filePath: { type: string }
+        lineNo: { type: integer }
+        source: { $ref: '#/components/schemas/CaseSource' }
+        verifyStatus: { $ref: '#/components/schemas/VerifyStatus' }
+    TestCaseListData:
+      type: object
+      properties: { testCases: { type: array, items: { $ref: '#/components/schemas/TestCaseItem' } } }
+    ReviewReportData:
+      type: object
+      description: 详情页首屏聚合（LLD §5.3.2）
+      properties:
+        taskInfo: { $ref: '#/components/schemas/TaskBrief' }
+        changeAnalysis: { $ref: '#/components/schemas/ChangeAnalysisData' }
+        comments: { type: array, items: { $ref: '#/components/schemas/ReviewCommentItem' } }
+        testCases: { type: array, items: { $ref: '#/components/schemas/TestCaseItem' } }
+        diffText: { type: string, description: 'unified diff 文本，供前端 diff2html 渲染（前端设计说明书 §2.3）' }
+    TraceNode: { type: object, properties: { id: { type: string }, type: { $ref: '#/components/schemas/ReviewTraceNodeType' }, name: { type: string } } }
+    TraceEdge: { type: object, properties: { from: { type: string }, to: { type: string }, relation: { type: string, examples: [ 'contains' ] } } }
+    ReviewTraceData:
+      type: object
+      properties:
+        nodes: { type: array, items: { $ref: '#/components/schemas/TraceNode' } }
+        edges: { type: array, items: { $ref: '#/components/schemas/TraceEdge' } }
+    ReviewConfirmCommentParam:
+      type: object
+      required: [ commentId ]
+      properties:
+        commentId: { type: integer, format: int64 }
+        confirmStatus: { type: integer, enum: [ 1 ], description: 固定为 1（有效） }
+    ReviewRejectCommentParam:
+      type: object
+      required: [ commentId ]
+      properties:
+        commentId: { type: integer, format: int64 }
+        confirmStatus: { type: integer, enum: [ 2 ], description: 固定为 2（误报） }
+        reason: { type: string, description: 误报原因，可选 }
+    AddTestCaseParam:
+      type: object
+      required: [ taskId, caseName, scenario, steps, expectedResult ]
+      properties:
+        taskId: { type: integer, format: int64 }
+        caseName: { type: string }
+        scenario: { $ref: '#/components/schemas/Scenario' }
+        preCondition: { type: string }
+        steps: { type: string }
+        expectedResult: { type: string }
+        filePath: { type: string }
+        lineNo: { type: integer }
+    UpdateTestCaseStatusParam:
+      type: object
+      required: [ caseId, verifyStatus ]
+      properties:
+        caseId: { type: integer, format: int64 }
+        verifyStatus: { $ref: '#/components/schemas/VerifyStatus' }
+    ReviewTriggerParam:
+      type: object
+      required: [ repoId, mrId ]
+      properties:
+        repoId: { type: integer, format: int64 }
+        mrId: { type: string, description: 'MR/PR 标识（平台侧 IID 或 number）' }
+        branch: { type: string }
+        commitId: { type: string }
+    TaskBriefData:
+      type: object
+      properties:
+        taskId: { type: integer, format: int64 }
+        taskNo: { type: string }
+        status: { $ref: '#/components/schemas/SubStatus' }
+    ReviewRetryParam:
+      type: object
+      required: [ taskId ]
+      properties:
+        taskId: { type: integer, format: int64 }
+        retryFrom: { type: string, description: 重试来源状态, enum: [ FAILED, TIMEOUT, DEGRADED, PARTIAL_SUCCESS ] }
+
+    # ── 规则配置 ───────────────────────────────────────────────────
+    PromptListParam:
+      allOf:
+        - $ref: '#/components/schemas/PageRequest'
+        - type: object
+          properties:
+            category: { $ref: '#/components/schemas/PromptCategory' }
+            keyword: { type: string }
+    PromptItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        promptCode: { type: string, description: '{{ref:}} 引用键与 seed 幂等唯一键（Prompt 设计说明书 §2.3）', examples: [ 'PTM-COMMON-OUTPUT-FORMAT' ] }
+        promptName: { type: string }
+        category: { $ref: '#/components/schemas/PromptCategory' }
+        content: { type: string }
+        currentVersion: { type: integer }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+        createdAt: { type: string, format: 'date-time' }
+        updatedAt: { type: string, format: 'date-time' }
+    PromptSaveParam:
+      type: object
+      required: [ promptCode, promptName, category, content ]
+      properties:
+        id: { type: integer, format: int64, description: 更新时必填 }
+        promptCode: { type: string }
+        promptName: { type: string }
+        category: { $ref: '#/components/schemas/PromptCategory' }
+        content: { type: string, description: '支持 {{var}} 与 {{ref:PTM-XXX}} 语法' }
+        changeDesc: { type: string, description: '更新时必填; 写入 prompt_version.change_desc' }
+    PromptVersionItem:
+      type: object
+      properties:
+        version: { type: integer }
+        content: { type: string }
+        changeDesc: { type: string }
+        createdAt: { type: string, format: 'date-time' }
+    PromptVersionListData:
+      type: object
+      properties: { versions: { type: array, items: { $ref: '#/components/schemas/PromptVersionItem' } } }
+    PromptRollbackParam:
+      type: object
+      required: [ promptId, version ]
+      properties:
+        promptId: { type: integer, format: int64 }
+        version: { type: integer }
+    PromptEvaluateParam:
+      type: object
+      required: [ promptId, fromVersion, toVersion ]
+      properties:
+        promptId: { type: integer, format: int64 }
+        fromVersion: { type: integer }
+        toVersion: { type: integer }
+        timeRange: { $ref: '#/components/schemas/TimeRange' }
+    PromptMetric:
+      type: object
+      properties:
+        version: { type: integer }
+        confirmRate: { type: number }
+        falsePositiveRate: { type: number }
+        pendingRate: { type: number }
+        adoptionRate: { type: number, description: 已提交修复数 / 确认有效数 }
+        casePassRate: { type: number }
+        severityDistribution: { type: object, additionalProperties: { type: number } }
+    PromptEvaluateData:
+      type: object
+      properties:
+        conclusion: { type: string, description: 'ok=样本充足; sampleInsufficient=对比区间任务量<30', enum: [ ok, sampleInsufficient ] }
+        metrics: { type: array, items: { $ref: '#/components/schemas/PromptMetric' } }
+    RuleListParam:
+      allOf:
+        - $ref: '#/components/schemas/PageRequest'
+        - type: object
+          properties:
+            dimension: { $ref: '#/components/schemas/Dimension' }
+            severity: { $ref: '#/components/schemas/Severity' }
+            status: { $ref: '#/components/schemas/EnableStatus' }
+            keyword: { type: string }
+    RuleItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        ruleCode: { type: string }
+        ruleName: { type: string }
+        dimension: { $ref: '#/components/schemas/Dimension' }
+        description: { type: string }
+        severity: { $ref: '#/components/schemas/Severity' }
+        promptTemplate: { type: string, description: 指令文本快照（去规范化存储，非外键） }
+        isSystem: { type: integer, enum: [ 0, 1 ], description: '1=系统内置，禁止删除' }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+    RuleSaveParam:
+      type: object
+      required: [ ruleCode, ruleName, dimension, severity ]
+      properties:
+        id: { type: integer, format: int64, description: 更新时必填 }
+        ruleCode: { type: string }
+        ruleName: { type: string }
+        dimension: { $ref: '#/components/schemas/Dimension' }
+        description: { type: string }
+        severity: { $ref: '#/components/schemas/Severity' }
+        promptTemplate: { type: string }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+    TestStrategyItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        strategyName: { type: string }
+        testFramework: { type: string, examples: [ 'JUnit 5', 'Pytest', 'Jest' ] }
+        scenarioPreference: { type: array, items: { $ref: '#/components/schemas/Scenario' } }
+        namingConvention: { type: string }
+        codeStyleTemplate: { type: string }
+        isDefault: { type: integer, enum: [ 0, 1 ] }
+        createdAt: { type: string, format: 'date-time' }
+    TestStrategySaveParam:
+      type: object
+      required: [ strategyName, testFramework ]
+      properties:
+        id: { type: integer, format: int64, description: 更新时必填 }
+        strategyName: { type: string }
+        testFramework: { type: string }
+        scenarioPreference: { type: array, items: { $ref: '#/components/schemas/Scenario' } }
+        namingConvention: { type: string }
+        codeStyleTemplate: { type: string }
+        promptTemplate: { type: string }
+        isDefault: { type: integer, enum: [ 0, 1 ] }
+    TestStrategySuggestParam:
+      type: object
+      required: [ strategyId, suggestion ]
+      properties:
+        strategyId: { type: integer, format: int64 }
+        suggestion: { type: string }
+    TemplateItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        templateName: { type: string }
+        language: { type: string, examples: [ 'Java', 'Python', 'Go', 'TypeScript' ] }
+        ruleCount: { type: integer }
+    TemplateApplyParam:
+      type: object
+      required: [ templateId ]
+      properties:
+        templateId: { type: integer, format: int64 }
+        repoIds: { type: array, items: { type: integer, format: int64 }, description: 可选; 不传表示仅写入规则不绑定仓库 }
+    TemplateApplyData:
+      type: object
+      properties:
+        written: { type: integer, description: 新写入规则数 }
+        skipped: { type: integer, description: 同编号已存在而跳过的规则数 }
+    TemplateSaveParam:
+      type: object
+      required: [ templateName, language ]
+      properties:
+        id: { type: integer, format: int64, description: 更新时必填 }
+        templateName: { type: string }
+        language: { type: string }
+        ruleCodes: { type: array, items: { type: string } }
+
+    # ── 运维管理 ───────────────────────────────────────────────────
+    MonitorMetricsParam:
+      type: object
+      properties:
+        metricTypes: { type: array, items: { type: string }, description: 可选; 不传返回全部（数据保留 30 天） }
+        timeRange: { $ref: '#/components/schemas/TimeRange' }
+    MonitorMetricsData:
+      type: object
+      properties:
+        webhookQps: { type: number }
+        latency: { type: object, properties: { p50: { type: number }, p95: { type: number }, p99: { type: number } } }
+        llmSuccessRate: { type: number }
+        tokenConsumption: { type: integer, format: int64 }
+        queueDepth: { type: integer, format: int64 }
+        trend: { type: array, items: { type: object, properties: { time: { type: string }, qps: { type: number }, latencyP95: { type: number } } } }
+    MonitorHealthData:
+      type: object
+      properties:
+        status: { type: string, enum: [ UP, DEGRADED, DOWN ] }
+        components: { type: array, items: { type: object, properties: { name: { type: string, examples: [ 'postgres' ] }, status: { type: string }, detail: { type: string } } } }
+    AuditListParam:
+      allOf:
+        - $ref: '#/components/schemas/PageRequest'
+        - type: object
+          properties:
+            operatorId: { type: integer, format: int64 }
+            operationType: { type: string, examples: [ 'PROMPT_CHANGE', 'RULE_CHANGE', 'USER_LOGIN', 'REVIEW_TRIGGER' ] }
+            startTime: { type: string, format: 'date-time' }
+            endTime: { type: string, format: 'date-time' }
+    AuditLogItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        operatorId: { type: integer, format: int64 }
+        operatorName: { type: string }
+        operationType: { type: string }
+        targetType: { type: string }
+        targetId: { type: integer, format: int64 }
+        detail: { type: object, additionalProperties: true, description: JSONB 操作详情 }
+        ipAddress: { type: string }
+        createdAt: { type: string, format: 'date-time' }
+
+    # ── 权限管理 ───────────────────────────────────────────────────
+    UserListParam:
+      allOf:
+        - $ref: '#/components/schemas/PageRequest'
+        - type: object
+          properties:
+            username: { type: string }
+            deptId: { type: integer, format: int64 }
+            status: { $ref: '#/components/schemas/EnableStatus' }
+            keyword: { type: string }
+    UserItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        username: { type: string }
+        email: { type: string }
+        phone: { type: string }
+        deptId: { type: integer, format: int64 }
+        deptName: { type: string }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+        roles: { type: array, items: { $ref: '#/components/schemas/RoleCode' } }
+        createdAt: { type: string, format: 'date-time' }
+    UserSaveParam:
+      type: object
+      required: [ username ]
+      properties:
+        id: { type: integer, format: int64, description: 更新时必填 }
+        username: { type: string }
+        password: { type: string, format: password, description: 创建时必填; 更新时留空表示不修改 }
+        email: { type: string }
+        phone: { type: string }
+        deptId: { type: integer, format: int64 }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+        roleIds: { type: array, items: { type: integer, format: int64 }, description: 缺省绑定 DEVELOPER }
+    UserResetPasswordParam:
+      type: object
+      required: [ id, newPassword ]
+      properties:
+        id: { type: integer, format: int64 }
+        newPassword: { type: string, format: password }
+    UserAssignRolesParam:
+      type: object
+      required: [ userId, roleIds ]
+      properties:
+        userId: { type: integer, format: int64 }
+        roleIds: { type: array, items: { type: integer, format: int64 } }
+    UserSyncParam:
+      type: object
+      required: [ source ]
+      properties:
+        source: { type: string, enum: [ LDAP, OIDC ] }
+        deptIds: { type: array, items: { type: integer, format: int64 } }
+    UserSyncData:
+      type: object
+      properties:
+        created: { type: integer }
+        updated: { type: integer }
+        skipped: { type: integer }
+    RoleItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        roleCode: { $ref: '#/components/schemas/RoleCode' }
+        roleName: { type: string }
+        description: { type: string }
+        isSystem: { type: integer, enum: [ 0, 1 ] }
+        createdAt: { type: string, format: 'date-time' }
+    RoleSaveParam:
+      type: object
+      required: [ roleCode, roleName ]
+      properties:
+        id: { type: integer, format: int64, description: 更新时必填 }
+        roleCode: { $ref: '#/components/schemas/RoleCode' }
+        roleName: { type: string }
+        description: { type: string }
+    RoleAssignPermissionsParam:
+      type: object
+      required: [ roleId, menuIds ]
+      properties:
+        roleId: { type: integer, format: int64 }
+        menuIds: { type: array, items: { type: integer, format: int64 } }
+    MenuNode:
+      type: object
+      description: sys_menu 映射，前端据此生成动态路由（前端设计说明书 §4.2）
+      properties:
+        id: { type: integer, format: int64 }
+        parentId: { type: integer, format: int64 }
+        menuName: { type: string }
+        menuCode: { type: string }
+        path: { type: string }
+        component: { type: string, examples: [ 'review/report' ] }
+        permissionCode: { type: string, examples: [ 'review:list' ] }
+        children: { type: array, items: { $ref: '#/components/schemas/MenuNode' } }
+    RolePermissionsData:
+      type: object
+      properties:
+        menuIds: { type: array, items: { type: integer, format: int64 } }
+        menuTree: { type: array, items: { $ref: '#/components/schemas/MenuNode' } }
+    DeptNode:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        deptName: { type: string }
+        parentId: { type: integer, format: int64 }
+        sortOrder: { type: integer }
+        leader: { type: string }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+        children: { type: array, items: { $ref: '#/components/schemas/DeptNode' } }
+    DeptTreeData:
+      type: object
+      properties: { tree: { type: array, items: { $ref: '#/components/schemas/DeptNode' } } }
+    DeptSaveParam:
+      type: object
+      required: [ deptName ]
+      properties:
+        id: { type: integer, format: int64, description: 更新时必填 }
+        deptName: { type: string }
+        parentId: { type: integer, format: int64, description: 0 表示根部门 }
+        sortOrder: { type: integer }
+        leader: { type: string }
+    DataPermissionItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        subjectType: { $ref: '#/components/schemas/PermSubjectType' }
+        subjectId: { type: integer, format: int64 }
+        resourceType: { $ref: '#/components/schemas/ResourceType' }
+        scope: { $ref: '#/components/schemas/DataScope' }
+        createdAt: { type: string, format: 'date-time' }
+    DataPermissionSaveParam:
+      type: object
+      required: [ subjectType, subjectId, resourceType, scope ]
+      properties:
+        id: { type: integer, format: int64, description: 更新时必填 }
+        subjectType: { $ref: '#/components/schemas/PermSubjectType' }
+        subjectId: { type: integer, format: int64 }
+        resourceType: { $ref: '#/components/schemas/ResourceType' }
+        scope: { $ref: '#/components/schemas/DataScope' }
+
+    # ── 系统配置 ───────────────────────────────────────────────────
+    PlatformItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        platformType: { $ref: '#/components/schemas/PlatformType' }
+        apiUrl: { type: string }
+        hasAccessToken: { type: boolean, description: '是否已配置 Access Token; 明文不回显' }
+        hasWebhookSecret: { type: boolean }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+        createdAt: { type: string, format: 'date-time' }
+    PlatformSaveParam:
+      type: object
+      required: [ platformType, apiUrl ]
+      properties:
+        id: { type: integer, format: int64, description: 更新时必填 }
+        platformType: { $ref: '#/components/schemas/PlatformType' }
+        apiUrl: { type: string }
+        accessToken: { type: string, format: password, description: AES-256 加密存储; 更新时留空表示不修改 }
+        webhookSecret: { type: string, format: password, description: 更新时留空表示不修改 }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+    PlatformTestConnectionParam:
+      type: object
+      required: [ platformType, apiUrl ]
+      properties:
+        platformType: { $ref: '#/components/schemas/PlatformType' }
+        apiUrl: { type: string }
+        accessToken: { type: string, format: password, description: 未保存也可测试; 留空使用已保存的凭据 }
+    TestResultData:
+      type: object
+      properties:
+        success: { type: boolean }
+        message: { type: string }
+        latencyMs: { type: integer }
+    ModelItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        provider: { type: string, examples: [ 'OpenAI', 'DeepSeek', '通义千问' ] }
+        modelName: { type: string }
+        apiUrl: { type: string }
+        temperature: { type: number, default: 0.3 }
+        maxTokens: { type: integer, default: 4096 }
+        timeout: { type: integer, default: 60, description: 秒 }
+        inputPrice: { type: number, description: 每千 Token 单价 }
+        outputPrice: { type: number }
+        scene: { $ref: '#/components/schemas/ModelScene' }
+        dataTraining: { type: integer, enum: [ 0, 1 ], description: '0=承诺不用于训练; 1=可能用于训练（涉密仓库禁止使用 1）' }
+        isBackup: { type: integer, enum: [ 0, 1 ], description: '1=备用模型（BR-06 降级切换）' }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+    ModelSaveParam:
+      type: object
+      required: [ provider, modelName, apiUrl, scene ]
+      properties:
+        id: { type: integer, format: int64, description: 更新时必填 }
+        provider: { type: string }
+        modelName: { type: string }
+        apiUrl: { type: string }
+        apiKey: { type: string, format: password, description: AES-256 加密存储; 更新时留空表示不修改 }
+        temperature: { type: number }
+        maxTokens: { type: integer }
+        timeout: { type: integer }
+        inputPrice: { type: number }
+        outputPrice: { type: number }
+        scene: { $ref: '#/components/schemas/ModelScene' }
+        dataTraining: { type: integer, enum: [ 0, 1 ] }
+        isBackup: { type: integer, enum: [ 0, 1 ] }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+    ModelTestConnectionParam:
+      type: object
+      required: [ apiUrl, modelName ]
+      properties:
+        apiUrl: { type: string }
+        apiKey: { type: string, format: password }
+        modelName: { type: string }
+    NotificationItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        configName: { type: string }
+        channel: { $ref: '#/components/schemas/NotifyChannel' }
+        webhookUrlMasked: { type: string, description: '掩码后的 Webhook 地址; 明文不回显' }
+        recipients: { type: string, description: 逗号分隔的邮箱/手机号/企微 userid }
+        triggerConditions: { type: array, items: { $ref: '#/components/schemas/TriggerCondition' } }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+    NotificationSaveParam:
+      type: object
+      required: [ configName, channel ]
+      properties:
+        id: { type: integer, format: int64, description: 更新时必填 }
+        configName: { type: string }
+        channel: { $ref: '#/components/schemas/NotifyChannel' }
+        webhookUrl: { type: string, format: password, description: AES-256 加密存储; 留空表示不修改 }
+        secret: { type: string, format: password, description: 加签密钥; 留空表示不修改 }
+        recipients: { type: string }
+        triggerConditions: { type: array, items: { $ref: '#/components/schemas/TriggerCondition' } }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+
+    # ── 成本管理 ───────────────────────────────────────────────────
+    CostQuotaListParam:
+      allOf:
+        - $ref: '#/components/schemas/PageRequest'
+        - type: object
+          properties:
+            subjectType: { $ref: '#/components/schemas/SubjectType' }
+            subjectId: { type: integer, format: int64 }
+            status: { $ref: '#/components/schemas/EnableStatus' }
+    CostQuotaItem:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        quotaName: { type: string }
+        subjectType: { $ref: '#/components/schemas/SubjectType' }
+        subjectId: { type: integer, format: int64 }
+        period: { $ref: '#/components/schemas/QuotaPeriod' }
+        tokenLimit: { type: integer, format: int64 }
+        amountLimit: { type: number }
+        warnThreshold: { type: string, description: '告警阈值百分比，逗号分隔', examples: [ '80,90' ] }
+        resetType: { $ref: '#/components/schemas/ResetType' }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+    CostQuotaSaveParam:
+      type: object
+      required: [ quotaName, subjectType, subjectId, period ]
+      properties:
+        id: { type: integer, format: int64, description: 更新时必填 }
+        quotaName: { type: string }
+        subjectType: { $ref: '#/components/schemas/SubjectType' }
+        subjectId: { type: integer, format: int64 }
+        period: { $ref: '#/components/schemas/QuotaPeriod' }
+        tokenLimit: { type: integer, format: int64, description: 与金额上限可二选一或同时配置 }
+        amountLimit: { type: number }
+        warnThreshold: { type: string }
+        resetType: { $ref: '#/components/schemas/ResetType' }
+        status: { $ref: '#/components/schemas/EnableStatus' }
+    CostConsumptionParam:
+      type: object
+      properties:
+        subjectType: { $ref: '#/components/schemas/SubjectType' }
+        subjectId: { type: integer, format: int64 }
+        timeRange: { $ref: '#/components/schemas/TimeRange' }
+    CostConsumptionItem:
+      type: object
+      properties:
+        statDate: { type: string, format: date }
+        modelName: { type: string }
+        inputTokens: { type: integer, format: int64 }
+        outputTokens: { type: integer, format: int64 }
+        totalTokens: { type: integer, format: int64 }
+        amount: { type: number }
+    CostConsumptionData:
+      type: object
+      properties:
+        list: { type: array, items: { $ref: '#/components/schemas/CostConsumptionItem' } }
+        total:
+          type: object
+          properties:
+            inputTokens: { type: integer, format: int64 }
+            outputTokens: { type: integer, format: int64 }
+            totalTokens: { type: integer, format: int64 }
+            amount: { type: number }
+    CostQuotaStatusParam:
+      type: object
+      required: [ subjectType, subjectId ]
+      properties:
+        subjectType: { $ref: '#/components/schemas/SubjectType' }
+        subjectId: { type: integer, format: int64 }
+    CostQuotaStatusData:
+      type: object
+      description: 实时计算，不落库（SRS §6.1 说明 1）
+      properties:
+        status: { $ref: '#/components/schemas/QuotaStatusEnum' }
+        usedPercent: { type: number }
+        tokenUsed: { type: integer, format: int64 }
+        tokenLimit: { type: integer, format: int64 }
+        amountUsed: { type: number }
+        amountLimit: { type: number }
+        blocked: { type: boolean, description: 'true 表示已触发 BR-COST-03 熔断' }
+
+    # ── 认证 ───────────────────────────────────────────────────────
+    AuthLoginParam:
+      type: object
+      required: [ username, password ]
+      properties:
+        username: { type: string }
+        password: { type: string, format: password }
+    AuthLoginData:
+      type: object
+      properties:
+        token: { type: string, description: JWT，有效期 7 天 }
+        refreshToken: { type: string }
+        expiresIn: { type: integer, description: 秒 }
+    AuthRefreshTokenParam:
+      type: object
+      required: [ refreshToken ]
+      properties: { refreshToken: { type: string } }
+    CurrentUserData:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        username: { type: string }
+        deptId: { type: integer, format: int64 }
+        roles: { type: array, items: { $ref: '#/components/schemas/RoleCode' } }
+        permissions: { type: array, items: { type: string }, description: '功能权限标识，如 review:confirmComment' }
+        menus: { type: array, items: { $ref: '#/components/schemas/MenuNode' } }
+
+    # ── 核心引擎 ───────────────────────────────────────────────────
+    WebhookPayload:
+      type: object
+      description: |
+        Git 平台原始事件 Payload，字段随平台不同（GitLab merge_request / GitHub pull_request / Gitea pull_request）。
+        服务端仅依赖 object_attributes.iid(action/state 等) 与项目/仓库标识；签名头为 X-Gitlab-Token 或 X-Hub-Signature-256 / X-Gitea-Signature。
+      additionalProperties: true
+      properties:
+        object_kind: { type: string, examples: [ 'merge_request' ] }
+        action: { type: string, description: 'open/update/merge/close（GitHub/Gitea 为 opened/synchronize/closed）' }
+        project: { type: object, additionalProperties: true }
+        repository: { type: object, additionalProperties: true }
+        object_attributes: { type: object, additionalProperties: true }
+    WebhookAcceptedResponse:
+      type: object
+      required: [ code, message, requestId ]
+      properties:
+        code: { type: integer, description: '0=成功; 40301=签名失败(HTTP 401); 40001=参数错误(HTTP 400); 50001=队列满(HTTP 503)' }
+        message: { type: string }
+        data:
+          type: object
+          properties:
+            status: { type: string, description: 'accepted=已入队; ignored=非目标事件; duplicate=幂等拦截', enum: [ accepted, ignored, duplicate ] }
+            taskId: { type: integer, format: int64, description: status=accepted 时返回 }
+            existTaskId: { type: integer, format: int64, description: status=duplicate 时返回 }
+            reason: { type: string, description: status=ignored 时返回原因 }
+        requestId: { type: string, format: uuid }
+    WebhookRetryParam:
+      type: object
+      required: [ taskId ]
+      properties: { taskId: { type: integer, format: int64 } }
+    FeedbackReportParam:
+      type: object
+      required: [ taskId, commentId, feedbackType ]
+      properties:
+        taskId: { type: integer, format: int64 }
+        commentId: { type: integer, format: int64 }
+        feedbackType: { $ref: '#/components/schemas/FeedbackType' }
+        reason: { type: string }
+    FeedbackFeedbackReportParam:
+      type: object
+      properties: { timeRange: { $ref: '#/components/schemas/TimeRange' } }
+    FeedbackFeedbackReportData:
+      type: object
+      properties:
+        falsePositiveTrend: { type: array, items: { type: object, properties: { date: { type: string }, falsePositiveRate: { type: number } } } }
+        promptChangeCount: { type: integer }
+        dimensionDistribution: { type: array, items: { type: object, properties: { dimension: { $ref: '#/components/schemas/Dimension' }, count: { type: integer } } } }
+        topFalsePositiveRules: { type: array, maxItems: 10, items: { type: object, properties: { ruleCode: { type: string }, ruleName: { type: string }, count: { type: integer } } } }
