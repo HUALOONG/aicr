@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xmlns="http://maven.apache.org/POM/4.0.0"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.joyintech</groupId>
+        <artifactId>aicr-parent</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <artifactId>aicr-security</artifactId>
+    <packaging>jar</packaging>
+    <name>aicr-security</name>
+    <description>安全核心包：认证、授权、加密、脱敏；定义 UserDetailsLoader / DataScopeResolver SPI</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.joyintech</groupId>
+            <artifactId>aicr-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.joyintech</groupId>
+            <artifactId>aicr-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.joyintech</groupId>
+            <artifactId>aicr-base</artifactId>
+        </dependency>
+    </dependencies>
+</project>
