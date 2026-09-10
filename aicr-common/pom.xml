@@ -42,7 +42,7 @@
                                         <exclude>org.springframework:*</exclude>
                                         <exclude>org.springframework.boot:*</exclude>
                                         <exclude>com.joyintech:aicr-*</exclude>
-                                        <exclude>com.fasterxml.jackson:*</exclude>
+                                        <exclude>com.fasterxml.jackson*:*</exclude>
                                         <exclude>cn.hutool:*</exclude>
                                         <exclude>org.slf4j:*</exclude>
                                         <exclude>org.mybatis:*</exclude>
