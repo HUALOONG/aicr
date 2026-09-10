@@ -25,13 +25,13 @@
 
     <build>
         <plugins>
-            <!-- 红线：common 禁止引入任何 Spring / Web / 业务依赖 -->
+            <!-- 红线四：common 禁止引入 Spring / Web / JSON / ORM / 日志门面 / 业务模块 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>
                 <executions>
                     <execution>
-                        <id>ban-spring</id>
+                        <id>ban-framework-and-biz</id>
                         <goals>
                             <goal>enforce</goal>
                         </goals>
@@ -42,8 +42,14 @@
                                         <exclude>org.springframework:*</exclude>
                                         <exclude>org.springframework.boot:*</exclude>
                                         <exclude>com.joyintech:aicr-*</exclude>
+                                        <exclude>com.fasterxml.jackson:*</exclude>
+                                        <exclude>cn.hutool:*</exclude>
+                                        <exclude>org.slf4j:*</exclude>
+                                        <exclude>org.mybatis:*</exclude>
+                                        <exclude>com.baomidou:*</exclude>
+                                        <exclude>org.apache.ibatis:*</exclude>
                                     </excludes>
-                                    <message>aicr-common 禁止依赖 Spring 与任何业务模块（HLD §2.4.3 红线三）</message>
+                                    <message>aicr-common 禁止依赖任何框架、日志门面、ORM、JSON 库与业务模块（HLD §2.4.3 红线四）。当前白名单：junit-jupiter(test)、lombok(provided)</message>
                                 </bannedDependencies>
                             </rules>
                         </configuration>
